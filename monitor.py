@@ -25,12 +25,40 @@ def get_json(url):
         return json.loads(r.read().decode("utf-8"))
 
 
+ENDPOINTS = [
+    ("https://api.encar.com/search/car/list/general", {"sr": "|ModifiedDate|0|100"}),
+    ("https://api.encar.com/search/car/list/premium", {"sr": "|ModifiedDate|0|100"}),
+    ("https://api.encar.com/search/car/list/mobile",
+     {"sr": "|MobileModifiedDate|0|100", "inav": "|Metadata|Sort"}),
+]
+WORKING = [0]
+
+
 def fetch(s):
-    params = urllib.parse.urlencode(
-        {"count": "true", "q": build_q(s), "sr": "|ModifiedDate|0|100"},
-        quote_via=urllib.parse.quote, safe="()._")
-    data = get_json("https://api.encar.com/search/car/list/general?" + params)
-    return data.get("SearchResults", [])
+    errors = []
+    order = [WORKING[0]] + [i for i in range(len(ENDPOINTS)) if i != WORKING[0]]
+    for i in order:
+        base, extra = ENDPOINTS[i]
+        params = {"count": "true", "q": build_q(s)}
+        params.update(extra)
+        url = base + "?" + urllib.parse.urlencode(
+            params, quote_via=urllib.parse.quote, safe="()._")
+        try:
+            data = get_json(url)
+            if "SearchResults" in data:
+                WORKING[0] = i
+                return data["SearchResults"]
+            errors.append(f"{base.split('/')[-1]}: no SearchResults, keys={list(data)[:5]}")
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", "ignore")[:150].replace("\n", " ")
+            except Exception:
+                pass
+            errors.append(f"{base.split('/')[-1]}: HTTP {e.code} {body}")
+        except Exception as e:
+            errors.append(f"{base.split('/')[-1]}: {e!r}")
+    raise Exception(" | ".join(errors))
 
 
 def usd_rate():
@@ -42,12 +70,16 @@ def usd_rate():
 
 def tg(method, **params):
     if not TOKEN:
-        print("no token:", method, params.get("text") or params.get("caption"))
+        print("TELEGRAM: нет TELEGRAM_TOKEN в секретах")
         return
     data = urllib.parse.urlencode(params).encode()
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
-    with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=30) as r:
-        r.read()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        print("TELEGRAM ERROR", e.code, e.read().decode("utf-8", "ignore")[:200])
+        raise
 
 
 def send_car(s, c, rate):
@@ -81,6 +113,11 @@ def main():
         state = {}
     meta = state.setdefault("_meta", {})
     rate = usd_rate()
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        try:
+            tg("sendMessage", chat_id=CHAT, text="🔧 Ручной запуск: проверка связи с Telegram. Курс: 1$ = %d ₩" % rate)
+        except Exception:
+            pass
     fails, baseline_total, sent = 0, 0, 0
     last_err = ""
 
